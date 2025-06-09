@@ -19,7 +19,7 @@ Future<Response> onRequest(RequestContext context, String id) async {
 // --- GET (Один запис) ---
 Future<Response> _getById(PostgreSQLConnection connection, String id) async {
   try {
-    final result = await connection.query('''
+    const query = '''
       SELECT 
         sg.id, g.id AS group_id, g.title AS group_title, 
         u.id AS user_id, u.firstName, u.lastName, u.midName
@@ -27,7 +27,8 @@ Future<Response> _getById(PostgreSQLConnection connection, String id) async {
       JOIN Groups g ON sg.groupId = g.id
       JOIN Users u ON sg.userId = u.id
       WHERE sg.id = @id 
-    ''', substitutionValues: {'id': id});
+    ''';
+    final result = await connection.query(query, substitutionValues: {'id': id});
 
     if (result.isEmpty) {
       return Response.json(statusCode: 404, body: {'error': 'StudentGroup entry not found'});
@@ -57,41 +58,48 @@ Future<Response> _update(RequestContext context, PostgreSQLConnection connection
     if (existingResult.isEmpty) {
       return Response.json(statusCode: 404, body: {'error': 'StudentGroup entry not found'});
     }
-    final existing = existingResult.first.toColumnMap();
     
+    final existing = existingResult.first.toColumnMap();
     final newUserId = data['userId'] ?? existing['userid'];
     final newGroupId = data['groupId'] ?? existing['groupid'];
     
-    // Перевірка існування нової групи
+    // 2. Валідація нових значень (якщо вони надані)
     if (data.containsKey('groupId')) {
         final groupExists = await connection.query('SELECT 1 FROM Groups WHERE id = @id', substitutionValues: {'id': newGroupId});
         if (groupExists.isEmpty) return Response.json(statusCode: 404, body: {'error': 'New group not found'});
     }
     
-    // Перевірка існування нового користувача і його ролі
     if (data.containsKey('userId')) {
         final userResult = await connection.query('SELECT type FROM Users WHERE id = @id', substitutionValues: {'id': newUserId});
-        if (userResult.isEmpty || userResult.first.toColumnMap()['type'] != 'STUDENT') {
-          return Response.json(statusCode: 404, body: {'error': 'New user not found or is not a student'});
+        if (userResult.isEmpty) {
+          return Response.json(statusCode: 404, body: {'error': 'New user not found'});
+        }
+        if (userResult.first.toColumnMap()['type'] != 'STUDENT') {
+          return Response.json(statusCode: 400, body: {'error': 'The new user is not a student.'});
         }
 
-        // Перевірка, чи новий студент вже не в іншій групі
+        // Перевірка, чи новий студент вже не в іншій групі (і це не цей самий запис)
         final conflict = await connection.query('SELECT 1 FROM StudentGroup WHERE userId = @userId AND id != @id', substitutionValues: {'userId': newUserId, 'id': id});
         if (conflict.isNotEmpty) {
-          return Response.json(statusCode: 409, body: {'error': 'This student is already assigned to another group.'});
+          return Response.json(statusCode: 409, body: {'error': 'Conflict: This student is already assigned to another group.'});
         }
     }
 
-    // 2. Виконання оновлення
-    await connection.query('UPDATE StudentGroup SET userId = @userId, groupId = @groupId WHERE id = @id',
+    // 3. Виконання оновлення
+    await connection.execute('UPDATE StudentGroup SET userId = @userId, groupId = @groupId WHERE id = @id',
         substitutionValues: {'id': id, 'userId': newUserId, 'groupId': newGroupId});
 
     return Response.json(body: {'message': 'StudentGroup entry updated successfully'});
+  } on FormatException catch (e) {
+    return Response.json(
+      statusCode: 400,
+      body: {'error': 'Bad Request: Invalid JSON format or empty request body. Details: ${e.message}'},
+    );
   } on PostgreSQLException catch (e) {
-    if (e.code == '23505') return Response.json(statusCode: 409, body: {'error': 'This assignment violates a unique constraint.'});
+    if (e.code == '23505') return Response.json(statusCode: 409, body: {'error': 'Conflict: This assignment violates a unique constraint.'});
     return Response.json(statusCode: 500, body: {'error': 'Database error: ${e.message}'});
   } catch (e) {
-    return Response.json(statusCode: 400, body: {'error': 'Bad Request: ${e.toString()}'});
+    return Response.json(statusCode: 500, body: {'error': 'An unexpected error occurred: ${e.toString()}'});
   }
 }
 
