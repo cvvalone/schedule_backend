@@ -1,7 +1,7 @@
 import 'package:dart_frog/dart_frog.dart';
 import 'package:postgres/postgres.dart';
 import 'package:bcrypt/bcrypt.dart';
-import 'package:schedule/database/uuid.dart';
+import 'package:schedule/database/uuid.dart'; // Припускаємо, що тут ваш IdGenerator
 
 // --- Валідатори ---
 final _emailRegex = RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$');
@@ -27,14 +27,12 @@ Future<Response> _getAll(RequestContext context, PostgreSQLConnection connection
     final params = context.request.uri.queryParameters;
     final userType = params['type'];
     final unassigned = params['unassigned'] == 'true';
+    final groupId = params['groupId']; // Фільтр за ID групи
 
     final substitutionValues = <String, dynamic>{};
     final whereClauses = <String>[];
 
-    // Оновлений запит:
-    // - для студентів знаходить групу через `StudentGroup`
-    // - для інших користувачів — через `Users.groupId`
-    // - COALESCE вибирає перший не-NULL результат для groupid та grouptitle
+    // Універсальний запит, що коректно знаходить групу для будь-якого користувача
     final query = StringBuffer('''
       SELECT 
         u.id, u.firstname, u.lastname, u.midname, u.email, u.avatar, 
@@ -53,22 +51,20 @@ Future<Response> _getAll(RequestContext context, PostgreSQLConnection connection
     
     // Динамічно будуємо WHERE-умову
     if (userType != null && userType.isNotEmpty) {
-      if (!_isValidType(userType)) {
-        return Response.json(statusCode: 400, body: {'error': 'Invalid user type.'});
-      }
+      if (!_isValidType(userType)) return Response.json(statusCode: 400, body: {'error': 'Invalid user type.'});
       whereClauses.add('u.type = @type');
       substitutionValues['type'] = userType.toUpperCase();
     }
     
-    // Додаємо умову для фільтрації неприв'язаних користувачів
+    // ОНОВЛЕНО: Спрощена логіка для неприв'язаних користувачів
     if (unassigned) {
-      // Якщо шукаємо неприв'язаних студентів, перевіряємо StudentGroup
-      if (userType?.toUpperCase() == 'STUDENT') {
-        whereClauses.add('sg.userid IS NULL');
-      } else {
-      // Для інших типів (або якщо тип не вказано) перевіряємо обидві умови
-        whereClauses.add('sg.userid IS NULL AND u.groupid IS NULL');
-      }
+      whereClauses.add('COALESCE(g1.id, g2.id) IS NULL');
+    }
+
+    // ОНОВЛЕНО: Додано фільтр за ID групи
+    if (groupId != null && groupId.isNotEmpty) {
+      whereClauses.add('COALESCE(g1.id, g2.id) = @groupId');
+      substitutionValues['groupId'] = groupId;
     }
     
     if (whereClauses.isNotEmpty) {
@@ -89,7 +85,7 @@ Future<Response> _getAll(RequestContext context, PostgreSQLConnection connection
         'id': rowMap['id'], 'firstName': rowMap['firstname'], 'lastName': rowMap['lastname'],
         'midName': rowMap['midname'], 'email': rowMap['email'], 'avatar': rowMap['avatar'],
         'phone': rowMap['phone'], 'type': rowMap['type'], 'authProvider': rowMap['authprovider'],
-        'group': groupData, // Виводимо об'єкт групи з назвою
+        'group': groupData,
       };
     }).toList();
 
@@ -104,12 +100,9 @@ Future<Response> _create(RequestContext context, PostgreSQLConnection connection
   try {
     final data = await context.request.json() as Map<String, dynamic>;
 
-    // 1. Валідація
     final requiredFields = ['firstName', 'lastName', 'email', 'password', 'type'];
     final missingFields = requiredFields.where((field) => data[field] == null || data[field].toString().isEmpty).toList();
-    if (missingFields.isNotEmpty) {
-      return Response.json(statusCode: 400, body: {'error': 'Missing or empty required fields: ${missingFields.join(', ')}'});
-    }
+    if (missingFields.isNotEmpty) return Response.json(statusCode: 400, body: {'error': 'Missing or empty required fields: ${missingFields.join(', ')}'});
     if (!_isValidEmail(data['email'] as String)) return Response.json(statusCode: 400, body: {'error': 'Invalid email format.'});
     if ((data['password'] as String).length < 6) return Response.json(statusCode: 400, body: {'error': 'Password must be at least 6 characters.'});
     if (!_isValidType(data['type'] as String)) return Response.json(statusCode: 400, body: {'error': 'Invalid user type.'});
@@ -117,16 +110,12 @@ Future<Response> _create(RequestContext context, PostgreSQLConnection connection
     final authProvider = data['authProvider']?.toString().toLowerCase() ?? 'password';
     if(!_isValidAuthProvider(authProvider)) return Response.json(statusCode: 400, body: {'error': 'Invalid authProvider.'});
 
-    // Валідація groupId (для не-студентів)
     final userType = (data['type'] as String).toUpperCase();
     if (userType != 'STUDENT' && data.containsKey('groupId') && data['groupId'] != null) {
       final groupResult = await connection.query('SELECT 1 FROM groups WHERE id = @id', substitutionValues: {'id': data['groupId']});
-      if (groupResult.isEmpty) {
-        return Response.json(statusCode: 400, body: {'error': 'Group with the specified ID does not exist.'});
-      }
+      if (groupResult.isEmpty) return Response.json(statusCode: 400, body: {'error': 'Group with the specified ID does not exist.'});
     }
     
-    // 2. Виконання запиту
     final hashedPassword = BCrypt.hashpw(data['password'] as String, BCrypt.gensalt());
     final newId = IdGenerator.generate();
     
@@ -139,18 +128,11 @@ Future<Response> _create(RequestContext context, PostgreSQLConnection connection
         'id': newId,
         'firstName': data['firstName'], 'lastName': data['lastName'], 'midName': data['midName'],
         'email': data['email'], 'avatar': data['avatar'], 'phone': data['phone'],
-        'type': userType,
-        'passwordHash': hashedPassword,
-        'authProvider': authProvider,
-        // groupId зберігається тільки для не-студентів
+        'type': userType, 'passwordHash': hashedPassword, 'authProvider': authProvider,
         'groupId': userType != 'STUDENT' ? data['groupId'] : null,
       },
     );
-
-    // Примітка: для прив'язки студента до групи (в StudentGroup)
-    // потрібен буде окремий запит/ендпоінт.
-
-    // 3. Успішна відповідь
+    
     return Response.json(statusCode: 201, body: {'message': 'User created successfully', 'id': newId});
   } on PostgreSQLException catch (e) {
     if (e.code == '23505') return Response.json(statusCode: 409, body: {'error': 'User with this email or phone already exists.'});

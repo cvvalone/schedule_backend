@@ -1,6 +1,7 @@
 import 'package:dart_frog/dart_frog.dart';
 import 'package:postgres/postgres.dart';
 import 'package:bcrypt/bcrypt.dart';
+import 'package:schedule/database/uuid.dart'; // ОНОВЛЕНО: Додано імпорт
 
 // --- Валідатори ---
 final _emailRegex = RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$');
@@ -25,7 +26,7 @@ Future<Response> onRequest(RequestContext context, String id) async {
 // --- GET (Один запис) ---
 Future<Response> _getById(PostgreSQLConnection connection, String id) async {
   try {
-    // Оновлений запит для отримання одного користувача з правильною групою
+    // ОНОВЛЕНО: Використовуємо той самий універсальний запит
     const query = '''
       SELECT 
         u.id, u.firstname, u.lastname, u.midname, u.email, u.avatar, 
@@ -49,22 +50,15 @@ Future<Response> _getById(PostgreSQLConnection connection, String id) async {
     }
     
     final rowMap = result.first.toColumnMap();
-    
     final groupData = rowMap['groupid'] != null
         ? {'id': rowMap['groupid'], 'title': rowMap['grouptitle']}
         : null;
         
     return Response.json(body: {
-      'id': rowMap['id'],
-      'firstName': rowMap['firstname'],
-      'lastName': rowMap['lastname'],
-      'midName': rowMap['midname'],
-      'email': rowMap['email'],
-      'avatar': rowMap['avatar'],
-      'phone': rowMap['phone'],
-      'type': rowMap['type'],
-      'authProvider': rowMap['authprovider'],
-      'group': groupData, // Виводимо об'єкт групи з назвою
+      'id': rowMap['id'], 'firstName': rowMap['firstname'], 'lastName': rowMap['lastname'],
+      'midName': rowMap['midname'], 'email': rowMap['email'], 'avatar': rowMap['avatar'],
+      'phone': rowMap['phone'], 'type': rowMap['type'], 'authProvider': rowMap['authprovider'],
+      'group': groupData,
     });
   } catch (e) {
     return Response.json(statusCode: 500, body: {'error': 'Internal Server Error: ${e.toString()}'});
@@ -79,47 +73,57 @@ Future<Response> _update(RequestContext context, PostgreSQLConnection connection
 
     final existingUserResult = await connection.query('SELECT type FROM users WHERE id = @id', substitutionValues: {'id': id});
     if (existingUserResult.isEmpty) return Response.json(statusCode: 404, body: {'error': 'User not found'});
-    
     final userType = existingUserResult.first.toColumnMap()['type'] as String;
 
-    // Валідація полів
     if (data.containsKey('email') && !_isValidEmail(data['email'] as String?)) return Response.json(statusCode: 400, body: {'error': 'Invalid email format.'});
     if (data.containsKey('type') && !_isValidType(data['type'] as String?)) return Response.json(statusCode: 400, body: {'error': 'Invalid user type.'});
     if (data.containsKey('authProvider') && !_isValidAuthProvider(data['authProvider'] as String?)) return Response.json(statusCode: 400, body: {'error': 'Invalid authProvider.'});
     if (data.containsKey('password') && (data['password'] == null || (data['password'] as String).length < 6)) {
-        return Response.json(statusCode: 400, body: {'error': 'Password must be at least 6 characters.'});
+      return Response.json(statusCode: 400, body: {'error': 'Password must be at least 6 characters.'});
     }
 
-    // Валідація groupId (тільки для не-студентів)
-    if (userType != 'STUDENT' && data.containsKey('groupId') && data['groupId'] != null) {
-      final groupResult = await connection.query('SELECT 1 FROM groups WHERE id = @id', substitutionValues: {'id': data['groupId']});
-      if (groupResult.isEmpty) {
-        return Response.json(statusCode: 400, body: {'error': 'Group with the specified ID does not exist.'});
-      }
+    final groupIdToUpdate = data.remove('groupId');
+
+    if (groupIdToUpdate != null) {
+      final groupResult = await connection.query('SELECT 1 FROM groups WHERE id = @id', substitutionValues: {'id': groupIdToUpdate});
+      if (groupResult.isEmpty) return Response.json(statusCode: 400, body: {'error': 'Group with the specified ID does not exist.'});
     }
-    
+
     final updateFields = <String>[];
     final substitutionValues = <String, dynamic>{'id': id};
-    
-    // Динамічне формування запиту
     data.forEach((key, value) {
       final dbKey = key.replaceAllMapped(RegExp(r'(?<!^)(?=[A-Z])'), (match) => '_${match.group(0)}').toLowerCase();
-
       if (key == 'password') {
         updateFields.add('passwordhash = @passwordHash');
         substitutionValues['passwordHash'] = BCrypt.hashpw(value as String, BCrypt.gensalt());
-      } else if (key == 'groupId' && userType == 'STUDENT') {
-        // Ігноруємо спробу оновити groupId для студента через цей ендпоінт
       } else if (key != 'id') {
         updateFields.add('$dbKey = @$key');
         substitutionValues[key] = value;
       }
     });
 
-    if (updateFields.isEmpty) return Response.json(statusCode: 400, body: {'error': 'No valid fields to update.'});
+    if (updateFields.isNotEmpty) {
+      final query = 'UPDATE users SET ${updateFields.join(', ')} WHERE id = @id';
+      await connection.query(query, substitutionValues: substitutionValues);
+    }
 
-    final query = 'UPDATE users SET ${updateFields.join(', ')} WHERE id = @id';
-    await connection.query(query, substitutionValues: substitutionValues);
+    if (groupIdToUpdate != null) {
+      if (userType == 'STUDENT') {
+        final existingLink = await connection.query('SELECT 1 FROM studentgroup WHERE userid = @userId', substitutionValues: {'userId': id});
+        if (existingLink.isNotEmpty) {
+          await connection.query('UPDATE studentgroup SET groupid = @groupId WHERE userid = @userId', substitutionValues: {'userId': id, 'groupId': groupIdToUpdate});
+        } else {
+          await connection.query('INSERT INTO studentgroup (id, userid, groupid) VALUES (@id, @userId, @groupId)',
+            substitutionValues: {'id': IdGenerator.generate(), 'userId': id, 'groupId': groupIdToUpdate});
+        }
+      } else {
+        await connection.query('UPDATE users SET groupid = @groupId WHERE id = @id', substitutionValues: {'id': id, 'groupId': groupIdToUpdate});
+      }
+    }
+    
+    if (updateFields.isEmpty && groupIdToUpdate == null) {
+      return Response.json(statusCode: 400, body: {'error': 'No valid fields to update.'});
+    }
     
     return Response.json(body: {'message': 'User updated successfully'});
   } on PostgreSQLException catch (e) {
@@ -133,8 +137,6 @@ Future<Response> _update(RequestContext context, PostgreSQLConnection connection
 // --- DELETE (Видалення) ---
 Future<Response> _delete(PostgreSQLConnection connection, String id) async {
   try {
-    // ON DELETE CASCADE в таблицях StudentGroup, ScheduleItem і т.д.
-    // автоматично видалить пов'язані з користувачем записи.
     final affectedRows = await connection.execute('DELETE FROM users WHERE id = @id', substitutionValues: {'id': id});
     if (affectedRows == 0) return Response.json(statusCode: 404, body: {'error': 'User not found'});
     return Response(body: 'User deleted successfully');

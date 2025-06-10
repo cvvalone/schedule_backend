@@ -11,11 +11,11 @@ Future<Response> onRequest(RequestContext context) async {
   }
 
   final data = await context.request.json() as Map<String, dynamic>;
-  final idToken = data['idToken'] as String?;
+  final accessToken = data['accessToken'] as String?;
   final type = (data['type'] as String?)?.toUpperCase();
 
-  if (idToken == null || type == null) {
-    return Response(statusCode: 400, body: 'Missing idToken or type');
+  if (accessToken == null || type == null) {
+    return Response(statusCode: 400, body: 'Missing accessToken or type');
   }
 
   if (!(type == 'TEACHER' || type == 'STUDENT' || type == 'ADMIN')) {
@@ -24,19 +24,22 @@ Future<Response> onRequest(RequestContext context) async {
 
   try {
     final res = await http.get(
-      Uri.parse('https://oauth2.googleapis.com/tokeninfo?id_token=$idToken'),
+      Uri.parse('https://www.googleapis.com/oauth2/v2/userinfo'),
+      headers: {
+        'Authorization': 'Bearer $accessToken',
+      },
     );
 
     if (res.statusCode != 200) {
-      return Response(statusCode: 401, body: 'Invalid Google token');
+      return Response(statusCode: 401, body: 'Invalid Google access token');
     }
 
-    final tokenInfo = json.decode(res.body) as Map<String, dynamic>;
+    final userInfo = json.decode(res.body) as Map<String, dynamic>;
 
-    final email = tokenInfo['email'] as String;
-    final firstName = tokenInfo['given_name'] as String? ?? '';
-    final lastName = tokenInfo['family_name'] as String? ?? '';
-    final avatar = tokenInfo['picture'] as String? ?? '';
+    final email = userInfo['email'] as String;
+    final firstName = userInfo['given_name'] as String? ?? '';
+    final lastName = userInfo['family_name'] as String? ?? '';
+    final avatar = userInfo['picture'] as String? ?? '';
 
     final connection = context.read<PostgreSQLConnection>();
 
@@ -75,13 +78,14 @@ Future<Response> onRequest(RequestContext context) async {
       );
     }
 
-    final accessToken = createAccessToken(userId);
-    final refreshToken = createRefreshToken(userId);
+    final jwtAccessToken = createAccessToken(userId);
+    final jwtRefreshToken = createRefreshToken(userId);
 
     return Response.json(body: {
       'message': 'Google login successful',
-      'accessToken': accessToken,
-      'refreshToken': refreshToken,
+      'accessToken': jwtAccessToken,
+      'refreshToken': jwtRefreshToken,
+      'userId': userId, // ← ДОДАНО
     });
   } catch (e) {
     return Response(statusCode: 500, body: 'Error: $e');
