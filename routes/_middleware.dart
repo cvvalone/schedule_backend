@@ -12,19 +12,50 @@ final pool = ConnectionPool(
   password: DbConfig.password,
 );
 
-Handler middleware(Handler handler) {
-  return (context) async {
-    await pool.initialize();
+/// Middleware для CORS
+Middleware cors() {
+  return (handler) {
+    return (context) async {
+      if (context.request.method == HttpMethod.options) {
+        return Response(
+          statusCode: 204,
+          headers: {
+            'Access-Control-Allow-Origin': '*', // або вкажи свій домен
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          },
+        );
+      }
 
-    final connection = await pool.acquire();
-
-    try {
-      final scopedHandler = handler.use(
-        provider<PostgreSQLConnection>((_) => connection),
-      );
-      return await scopedHandler.call(context);
-    } finally {
-      pool.release(connection);
-    }
+      final response = await handler(context);
+      return response.copyWith(headers: {
+        ...response.headers,
+        'Access-Control-Allow-Origin': '*', // або свій домен
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      });
+    };
   };
+}
+
+Handler middleware(Handler handler) {
+  final poolMiddleware = (Handler handler) {
+    return (RequestContext context) async {
+      await pool.initialize();
+
+      final connection = await pool.acquire();
+
+      try {
+        final scopedHandler = handler.use(
+          provider<PostgreSQLConnection>((_) => connection),
+        );
+        return await scopedHandler.call(context);
+      } finally {
+        pool.release(connection);
+      }
+    };
+  };
+
+  // Спочатку CORS, потім пул підключень
+  return cors()(poolMiddleware(handler));
 }
