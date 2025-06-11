@@ -22,7 +22,8 @@ Middleware cors() {
           headers: {
             'Access-Control-Allow-Origin': '*', // або вкажи свій домен
             'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+            'Access-Control-Allow-Headers':
+                'Content-Type, Authorization, app_version',
           },
         );
       }
@@ -32,7 +33,8 @@ Middleware cors() {
         ...response.headers,
         'Access-Control-Allow-Origin': '*', // або свій домен
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Allow-Headers':
+            'Content-Type, Authorization, app_version',
       });
     };
   };
